@@ -1,0 +1,7 @@
+openai
+pvporcupine
+pvcobra
+pyaudio
+pvleopard
+rpi-ws281x
+
