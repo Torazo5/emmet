@@ -21,6 +21,8 @@ print('code starting')
 
 
 def audio(prompt):
+    global is_speaking_or_listening
+    is_speaking_or_listening = True  # Assistant is now speaking
     speech_file_path = "output_audio.wav"
     with client.audio.speech.with_streaming_response.create(
         model="tts-1",
@@ -30,6 +32,8 @@ def audio(prompt):
         response.stream_to_file(speech_file_path)
     
     subprocess.run(['mpg321','output_audio.wav'])
+    is_speaking_or_listening = False  # Finished speaking
+
 
 
 def transcribe(path):
@@ -38,21 +42,56 @@ def transcribe(path):
 def shut_down():
     sys.exit()
 
-def timer_finished():
-    print("Timer is up!")
+is_speaking_or_listening = False
 
-def set_timer(duration_seconds):
-    print("Timer set for {} seconds.".format(duration_seconds))
-    timer_thread = threading.Timer(duration_seconds, timer_finished)
+
+def timer_finished(message):
+    global is_speaking_or_listening
+
+    # Wait until the assistant is not speaking or listening
+    while is_speaking_or_listening:
+        time.sleep(1)
+
+    # Play the initial mp3 file
+    is_speaking_or_listening = True
+    subprocess.run(['mpg321', 'rg1.mp3'])
+
+    # Wait 1 second before delivering the reminder message
+    time.sleep(1)
+
+    # Deliver the reminder
+    if message:
+        print(message)
+        audio(message)  # Speak the reminder using the audio system
+    else:
+        print("Time's up!")
+        audio("Time's up!")  # Default reminder message
+
+    # Wait 0.5 seconds before playing the ending mp3
+    time.sleep(0.5)
+
+    # Play the final mp3 file
+    subprocess.run(['mpg321', 'rg1-over.mp3'])
+
+    # After everything is done, reset the flag
+    is_speaking_or_listening = False
+
+def set_timer(duration_seconds, message=""):
+    print(f"Timer set for {duration_seconds} seconds.")
+    
+    # Start the timer thread and pass the message to the callback function
+    timer_thread = threading.Timer(duration_seconds, timer_finished, [message])
     timer_thread.start()
-    return "Timer set for {} seconds.".format(duration_seconds)  # Return message
-
-
+    
+    return f"Timer set for {duration_seconds} seconds."  # Return message
 custom_functions = [
     {
         'name': 'shut_down',
         'description': 'Shut down the whole code. Python script stops running',
-        'parameters': {}
+        'parameters': {
+            "type": "object",
+            "properties": {}  # Empty properties to indicate no parameters
+        }
     },
     {
         'name': 'set_timer',
@@ -63,9 +102,14 @@ custom_functions = [
                 "duration_seconds": {
                     "type": "integer",
                     "description": "The duration for how long the timer is (in seconds)"
+                },
+                "message": {
+                    "type": "string",
+                    "description": "What to remind the user after the timer ends (can be left blank)"
                 }
             },
-            "required": ["duration_seconds"]
+            "required": ["duration_seconds"],
+            "additionalProperties": False  # To prevent any extra, unexpected parameters
         }
     }
 ]
@@ -132,8 +176,16 @@ def response_handle(input_text):
             "set_timer": set_timer,
         }
         
-        fuction_to_call = available_functions[function_called]
-        response_message = fuction_to_call(*list(function_args.values()))
+        function_to_call = available_functions[function_called]
+        
+        if function_called == "shut_down":
+            function_to_call(*list(function_args.values()))
+            # No response message, the system will terminate here
+        else:
+            # Call the function and return the response message
+            function_result = function_to_call(*list(function_args.values()))
+            response_message = f"The function '{function_called}' was executed successfully: {function_result}"
+
     else:
         response_message = response_message.content 
     
@@ -226,6 +278,8 @@ def wake_word():
 
 # Function to record and save audio until silence is detected
 def detect_silence_and_record(min_recording_duration=2.0, silence_duration_threshold=1.3, output_filename="recorded_audio.wav"):
+    global is_speaking_or_listening
+    is_speaking_or_listening = True  # Assistant is now listening
     cobra = pvcobra.create(access_key=pv_access_key)
     silence_pa = pyaudio.PyAudio()
 
@@ -270,6 +324,8 @@ def detect_silence_and_record(min_recording_duration=2.0, silence_duration_thres
     save_audio_to_wav(audio_data, silence_pa.get_sample_size(pyaudio.paInt16), cobra.sample_rate, output_filename)
 
     print(f"Audio saved to {output_filename}")
+    is_speaking_or_listening = False  # Finished listening
+
 
 # Function to save audio data to a WAV file
 def save_audio_to_wav(audio_data, sample_width, sample_rate, filename):
