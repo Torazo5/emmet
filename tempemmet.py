@@ -13,11 +13,84 @@ import pvleopard
 import json
 import threading
 from pathlib import Path
+import datetime
 
 client = OpenAI(api_key = os.getenv("OPENAI_API_KEY"))
 
 leopard = pvleopard.create(access_key= os.getenv("PICOVOICE_API_KEY"))
 print('code starting')
+
+def compute_exact_datetime_sub_gpt(current_time, user_request):
+    prompt = (
+        f"The current date and time is {current_time}. "
+        f"Given the following user request: '{user_request}', "
+        f"compute the exact date and time for the reminder in ISO 8601 format (YYYY-MM-DDTHH:MM:SS). "
+        f"Only provide the datetime in ISO 8601 format, do not include any extra text."
+    )
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": prompt
+            }
+        ],
+        temperature=0,
+        max_tokens=20,
+        top_p=1,
+        frequency_penalty=0,
+        presence_penalty=0,
+    )
+    datetime_str = response.choices[0].message.content.strip()
+    # Validate the datetime format
+    try:
+        datetime.datetime.fromisoformat(datetime_str)
+        return datetime_str
+    except ValueError:
+        return None
+    
+def check_reminders():
+    while True:
+        now = datetime.datetime.now()
+        reminders_to_keep = []
+        if os.path.exists('reminders.json'):
+            with open('reminders.json', 'r') as f:
+                reminders = json.load(f)
+            for reminder in reminders:
+                reminder_time = datetime.datetime.fromisoformat(reminder['reminder_time'])
+                if now >= reminder_time:
+                    # Time to trigger the reminder
+                    timer_finished(reminder['message'])
+                else:
+                    # Keep this reminder
+                    reminders_to_keep.append(reminder)
+            # Save the remaining reminders back to the file
+            with open('reminders.json', 'w') as f:
+                json.dump(reminders_to_keep, f, indent=4)
+        time.sleep(30)  # Check every 30 seconds
+
+def process_reminder_request(user_request):
+    current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    # Call the sub GPT instance
+    exact_datetime = compute_exact_datetime_sub_gpt(current_time, user_request)
+    if exact_datetime is None:
+        return "Sorry, I couldn't understand the reminder time."
+    # Save the reminder
+    reminder = {
+        'reminder_time': exact_datetime,
+        'message': user_request  # Using the original user request as the message
+    }
+    # Load existing reminders
+    reminders = []
+    if os.path.exists('reminders.json'):
+        with open('reminders.json', 'r') as f:
+            reminders = json.load(f)
+    # Add the new reminder
+    reminders.append(reminder)
+    # Save back to the file
+    with open('reminders.json', 'w') as f:
+        json.dump(reminders, f, indent=4)
+    return f"Reminder set for {exact_datetime}: {user_request}"
 
 
 def audio(prompt):
@@ -95,7 +168,7 @@ custom_functions = [
     },
     {
         'name': 'set_timer',
-        'description': 'Set a timer in the computer',
+        'description': 'Set a timer in the computer(Does not require the current time)',
         'parameters': {
             "type": "object",
             "properties": {
@@ -110,6 +183,21 @@ custom_functions = [
             },
             "required": ["duration_seconds"],
             "additionalProperties": False  # To prevent any extra, unexpected parameters
+        }
+    },
+    {
+        'name': 'process_reminder_request',
+        'description': 'Process a reminder request that requires computing exact datetime',
+        'parameters': {
+            "type": "object",
+            "properties": {
+                "user_request": {
+                    "type": "string",
+                    "description": "The user's original reminder request"
+                }
+            },
+            "required": ["user_request"],
+            "additionalProperties": False
         }
     }
 ]
@@ -129,12 +217,15 @@ def chatgpt_response(input_text):
         messages=[
             {
             "role": "system",
-            "content": [
-                {
-                "text": "You are a personal assistant named Emmet and is embedded in a Raspberry Pi 3B+ 2017 model. You serve a 16 year old boy called Torazo.\nYou will talk to the user in a casual conversational manner, short and concise.\nAll your dialogue should be max 2 sentences or 150 tokens. Unless, you are supplying information about extended information such as weather, to-do tasks, messages etc.\nAny requests that require long texts of information like code, long stories and such should all be restricted. Ensure that all responses remain concise, aiming for no more than 100 characters per sentence. If the response exceeds that, rephrase or condense it while maintaining clarity and brevity. Prioritize getting to the point efficiently. ",
-                "type": "text"
-                }
-            ]
+            "content": (
+                    "You are a personal assistant named Emmet embedded in a Raspberry Pi 3B+ 2017 model. "
+                    "You serve a 16-year-old boy called Torazo. You will talk to the user in a casual, "
+                    "conversational manner, short and concise. All your dialogue should be a maximum of 2 sentences "
+                    "or 150 tokens unless supplying extended information like weather, to-do tasks, messages, etc. "
+                    "Ensure that all responses remain concise, aiming for no more than 100 characters per sentence. "
+                    "Prioritize getting to the point efficiently. "
+                    "call the function 'process_reminder_request' with the user's original request."
+                )
             },
             {
                 "role": "user",
@@ -155,6 +246,8 @@ def response_handle(input_text):
     response = chatgpt_response(input_text)
     available_functions = {
         "shut_down": shut_down,
+        "process_reminder_request": process_reminder_request,
+        "set_timer": set_timer,
     }
     response_message = response.choices[0].message
 
@@ -171,11 +264,7 @@ def response_handle(input_text):
         print(function_args)
         print()
         # Function names
-        available_functions = {
-            "shut_down": shut_down,
-            "set_timer": set_timer,
-        }
-        
+
         function_to_call = available_functions[function_called]
         
         if function_called == "shut_down":
@@ -361,6 +450,9 @@ def transcribe_audio_with_whisper_cpp(filename):
         print("Error: Transcription file not found. The command may have failed.")
 
 def main():
+    reminder_thread = threading.Thread(target=check_reminders)
+    reminder_thread.daemon = True
+    reminder_thread.start()
     try:
         while True:
             print('while loop starting')
