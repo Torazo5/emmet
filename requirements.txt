@@ -1,7 +1,8 @@
 openai
 pvporcupine
 pvcobra
-pyaudio
 pvleopard
-rpi-ws281x
+pyaudio
+rpi_ws281x
+adafruit-circuitpython-neopixel
 

@@ -25,4 +25,3 @@ time.sleep(3)  # Wait for 3 seconds
 for x in range(LED_COUNT):
     strip.setPixelColor(x, Color(0, 0, 0))  # Set color to off (black)
 
-strip.show()  # Display the changes to turn the LEDs off
