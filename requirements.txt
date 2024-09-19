@@ -5,4 +5,4 @@ pvleopard
 pyaudio
 rpi_ws281x
 adafruit-circuitpython-neopixel
-
+langchain

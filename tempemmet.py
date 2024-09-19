@@ -20,6 +20,19 @@ client = OpenAI(api_key = os.getenv("OPENAI_API_KEY"))
 leopard = pvleopard.create(access_key= os.getenv("PICOVOICE_API_KEY"))
 print('code starting')
 
+def load_conversations():
+    if os.path.exists('conversations.json'):
+        with open('conversations.json', 'r') as f:
+            return json.load(f)
+    else:
+        return []
+
+# Save conversations to file
+def save_conversations(conversation_history):
+    with open('conversations.json', 'w') as f:
+        json.dump(conversation_history, f, indent=4)
+
+        
 def compute_exact_datetime_sub_gpt(current_time, user_request):
     prompt = (
         f"The current date and time is {current_time}. "
@@ -210,40 +223,46 @@ def openai_transcribe(path):
       file=audio_file
     )
     return (transcription.text)
+def chatgpt_response(input_text, conversation_history):
+    messages = conversation_history[:]
 
-def chatgpt_response(input_text):
+    # Add the current user message to the conversation history
+    messages.append({
+        "role": "user",
+        "content": input_text
+    })
+
+    # Send the full conversation history to the API
     response = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[
-            {
-            "role": "system",
-            "content": (
-                    "You are a personal assistant named Emmet embedded in a Raspberry Pi 3B+ 2017 model. "
-                    "You serve a 16-year-old boy called Torazo. You will talk to the user in a casual, "
-                    "conversational manner, short and concise. All your dialogue should be a maximum of 2 sentences "
-                    "or 150 tokens unless supplying extended information like weather, to-do tasks, messages, etc. "
-                    "Ensure that all responses remain concise, aiming for no more than 100 characters per sentence. "
-                    "Prioritize getting to the point efficiently. "
-                    "call the function 'process_reminder_request' with the user's original request."
-                )
-            },
-            {
-                "role": "user",
-                "content": input_text
-            }
-        ],
+        messages=messages,
         temperature=1,
         max_tokens=256,
         top_p=1,
         frequency_penalty=0,
         presence_penalty=0,
-        functions = custom_functions,
-        function_call = 'auto'
+        functions=custom_functions,
+        function_call='auto'
     )
-    return response
+
+    # Get the assistant's response
+    assistant_message = response
+
+    # Add the assistant's response to the conversation history
+    messages.append({
+        "role": "assistant",
+        "content": assistant_message.choices[0].message.content
+    })
+
+    # Save the updated conversation history
+    save_conversations(messages)
+
+    return assistant_message
 
 def response_handle(input_text):
-    response = chatgpt_response(input_text)
+    conversation_history = load_conversations()
+
+    response = chatgpt_response(input_text, conversation_history)
     available_functions = {
         "shut_down": shut_down,
         "process_reminder_request": process_reminder_request,
