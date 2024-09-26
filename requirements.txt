@@ -1,0 +1,6 @@
+openai
+pvporcupine
+pvcobra
+pvleopard
+pyaudio
+langchain
