@@ -13,7 +13,6 @@ import pvleopard
 import json
 import threading
 from pathlib import Path
-import datetime
 import bs4
 from sqlalchemy import create_engine, Column, Integer, String, Text, ForeignKey
 from sqlalchemy.orm import sessionmaker, relationship, declarative_base
@@ -28,6 +27,9 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+from shared_state import shared_state
+from reminder_system import ReminderSystem
 
 llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
 
@@ -100,16 +102,6 @@ def get_session_history(session_id: str) -> BaseChatMessageHistory:
     if session_id not in store:
         store[session_id] = load_session_history(session_id)
     return store[session_id]
-
-# # Ensure you save the chat history to the database when needed
-# def save_all_sessions():
-#     for session_id, chat_history in store.items():
-#         for message in chat_history.messages:
-#             save_message(session_id, message["role"], message["content"])
-
-# # Example of saving all sessions before exiting the application
-# import atexit
-# atexit.register(save_all_sessions)
 
 ### Construct retriever ###
 loader = WebBaseLoader(
@@ -196,72 +188,8 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 leopard = pvleopard.create(access_key=os.getenv("PICOVOICE_API_KEY"))
 print('Code starting...')
 
-def compute_exact_datetime_sub_gpt(current_time, user_request):
-    prompt = (
-        f"The current date and time is {current_time}. "
-        f"Given the following user request: '{user_request}', "
-        f"compute the exact date and time for the reminder in ISO 8601 format (YYYY-MM-DDTHH:MM:SS). "
-        f"Only provide the datetime in ISO 8601 format, do not include any extra text."
-    )
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": prompt
-            }
-        ],
-        temperature=0,
-        max_tokens=20,
-        top_p=1,
-        frequency_penalty=0,
-        presence_penalty=0,
-    )
-    datetime_str = response.choices[0].message.content.strip()
-    try:
-        datetime.datetime.fromisoformat(datetime_str)
-        return datetime_str
-    except ValueError:
-        return None
-
-def check_reminders():
-    while True:
-        now = datetime.datetime.now()
-        reminders_to_keep = []
-        if os.path.exists('reminders.json'):
-            with open('reminders.json', 'r') as f:
-                reminders = json.load(f)
-            for reminder in reminders:
-                reminder_time = datetime.datetime.fromisoformat(reminder['reminder_time'])
-                if now >= reminder_time:
-                    timer_finished(reminder['message'])
-                else:
-                    reminders_to_keep.append(reminder)
-            with open('reminders.json', 'w') as f:
-                json.dump(reminders_to_keep, f, indent=4)
-        time.sleep(30)
-
-def process_reminder_request(user_request):
-    current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    exact_datetime = compute_exact_datetime_sub_gpt(current_time, user_request)
-    if exact_datetime is None:
-        return "Sorry, I couldn't understand the reminder time."
-    reminder = {
-        'reminder_time': exact_datetime,
-        'message': user_request
-    }
-    reminders = []
-    if os.path.exists('reminders.json'):
-        with open('reminders.json', 'r') as f:
-            reminders = json.load(f)
-    reminders.append(reminder)
-    with open('reminders.json', 'w') as f:
-        json.dump(reminders, f, indent=4)
-    return f"Reminder set for {exact_datetime}: {user_request}"
-
 def audio(prompt):
-    global is_speaking_or_listening
-    is_speaking_or_listening = True
+    shared_state.is_speaking_or_listening = True
     speech_file_path = "output_audio.wav"
     with client.audio.speech.with_streaming_response.create(
         model="tts-1",
@@ -270,38 +198,18 @@ def audio(prompt):
     ) as response:
         response.stream_to_file(speech_file_path)
     subprocess.run(['afplay', 'output_audio.wav'])  # Use 'afplay' on MacOS
-    is_speaking_or_listening = False
+    shared_state.is_speaking_or_listening = False
+reminder_system = ReminderSystem(client, audio)
+# Start the reminder thread
+reminder_thread = threading.Thread(target=reminder_system.check_reminders)
+reminder_thread.daemon = True
+reminder_thread.start()
 
 def transcribe(path):
     pass
 
 def shut_down():
     pass
-
-is_speaking_or_listening = False
-
-def timer_finished(message):
-    global is_speaking_or_listening
-    while is_speaking_or_listening:
-        time.sleep(1)
-    is_speaking_or_listening = True
-    subprocess.run(['afplay', 'rg1.mp3'])
-    time.sleep(1)
-    if message:
-        print(message)
-        audio(message)
-    else:
-        print("Time's up!")
-        audio("Time's up!")
-    time.sleep(0.5)
-    subprocess.run(['afplay', 'rg1-over.mp3'])
-    is_speaking_or_listening = False
-
-def set_timer(duration_seconds, message=""):
-    print(f"Timer set for {duration_seconds} seconds.")
-    timer_thread = threading.Timer(duration_seconds, timer_finished, [message])
-    timer_thread.start()
-    return f"Timer set for {duration_seconds} seconds."
 
 custom_functions = [
     {
@@ -347,6 +255,7 @@ custom_functions = [
         }
     }
 ]
+
 def quick_gpt_ping():
     try:
         response = client.chat.completions.create(
@@ -391,14 +300,16 @@ def chatgpt_response(input_text):
     )
     return response
 session_id = "session_123"
+
 def response_handle(input_text):
     response = chatgpt_response(input_text)
 
     available_functions = {
         "shut_down": shut_down,
-        "process_reminder_request": process_reminder_request,
-        "set_timer": set_timer,
+        "process_reminder_request": reminder_system.process_reminder_request,
+        "set_timer": reminder_system.set_timer,
     }
+
     response_message = response.choices[0].message
     if dict(response_message).get('function_call'):
         function_called = response_message.function_call.name
@@ -418,6 +329,7 @@ def response_handle(input_text):
     else:
         response_message = response_message.content
     return response_message
+
 
 # Replace with your Picovoice access key
 pv_access_key = os.getenv("PICOVOICE_API_KEY")
@@ -488,7 +400,7 @@ def wake_word():
         wake_pa.terminate()
 
 def detect_silence_and_record(min_recording_duration=2.0, silence_duration_threshold=1.3, output_filename="recorded_audio.wav"):
-    global is_speaking_or_listening
+
     is_speaking_or_listening = True
     cobra = pvcobra.create(access_key=pv_access_key)
     silence_pa = pyaudio.PyAudio()
@@ -534,10 +446,6 @@ def save_audio_to_wav(audio_data, sample_width, sample_rate, filename):
 
 def main():
     quick_gpt_ping()
-
-    reminder_thread = threading.Thread(target=check_reminders)
-    reminder_thread.daemon = True
-    reminder_thread.start()
     try:
         while True:
             print('While loop starting...')
