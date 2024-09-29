@@ -1,45 +1,75 @@
-
+from typing import Annotated, Literal
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START
+from langgraph.graph.message import add_messages
+from langchain_core.messages import HumanMessage
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.prebuilt import ToolNode
 from langchain_openai import ChatOpenAI
-
-llm = ChatOpenAI(model="gpt-4o-mini")
-
 from langchain_core.tools import tool
 
+# Set up the memory system to persist state in memory
+memory = MemorySaver()
 
+# Define the state to include messages
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+
+# Define the tool (placeholder search tool)
 @tool
-def add(a: int, b: int) -> int:
-    """Adds a and b."""
-    return a + b
+def search(query: str):
+    """Call to surf the web."""
+    return ["The answer to your question lies within."]
 
+tools = [search]
 
-@tool
-def multiply(a: int, b: int) -> int:
-    """Multiplies a and b."""
-    return a * b
+# Define the ToolNode that will handle tool invocations
+tool_node = ToolNode(tools)
 
+# Define the model
+model = ChatOpenAI(temperature=0, streaming=True)
 
-tools = [add, multiply]
+# Bind the tools to the model
+bound_model = model.bind_tools(tools)
 
-llm_with_tools = llm.bind_tools(tools)
+# Define a function that calls the model (the agent node)
+def call_model(state: State):
+    response = model.invoke(state["messages"])
+    return {"messages": response}
 
-from langchain_core.messages import HumanMessage
+# Define a function to decide whether to continue or end the graph
+def should_continue(state: State) -> Literal["action", "__end__"]:
+    last_message = state["messages"][-1]
+    if not last_message.tool_calls:
+        return "__end__"
+    return "action"
 
-query = "What is 3 * 12? Also, what is 11 + 49?"
+# Build the graph
+workflow = StateGraph(State)
 
-messages = [HumanMessage(query)]
+# Add nodes (agent and action)
+workflow.add_node("agent", call_model)
+workflow.add_node("action", tool_node)
 
-ai_msg = llm_with_tools.invoke(messages)
+# Define the entry point (start with agent)
+workflow.add_edge(START, "agent")
 
-print(ai_msg.tool_calls)
+# Add conditional edges to decide if we continue or end
+workflow.add_conditional_edges("agent", should_continue)
 
-messages.append(ai_msg)
+# Add normal edge to loop back to the agent after invoking tools
+workflow.add_edge("action", "agent")
 
-for tool_call in ai_msg.tool_calls:
-    selected_tool = {"add": add, "multiply": multiply}[tool_call["name"].lower()]
-    tool_msg = selected_tool.invoke(tool_call)
-    messages.append(tool_msg)
+# Compile the graph with memory persistence
+app = workflow.compile(checkpointer=memory)
 
-print(messages)
-print('____')
-print(llm_with_tools.invoke(messages))
+# Function to test and stream responses
+def run_conversation(thread_id: str, input_message: str):
+    config = {"configurable": {"thread_id": thread_id}}
+    message = HumanMessage(content=input_message)
+    for event in app.stream({"messages": [message]}, config, stream_mode="values"):
+        event["messages"][-1].pretty_print()
 
+# Test the bot with memory
+print("Starting conversation with thread 2 (remembering context)")
+run_conversation("2", "what is my name?")

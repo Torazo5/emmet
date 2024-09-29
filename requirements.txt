@@ -12,3 +12,4 @@ langchain-chroma
 bs4
 python-dotenv
 sqlalchemy
+langgraph

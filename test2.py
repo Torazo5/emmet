@@ -1,174 +1,79 @@
-import bs4
-from sqlalchemy import create_engine, Column, Integer, String, Text, ForeignKey
-from sqlalchemy.orm import sessionmaker, relationship, declarative_base
-from sqlalchemy.exc import SQLAlchemyError
-from langchain.chains import create_history_aware_retriever, create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_chroma import Chroma
-from langchain_community.chat_message_histories import ChatMessageHistory
-from langchain_community.document_loaders import WebBaseLoader
-from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from psycopg import Connection
+from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.prebuilt import create_react_agent
+from langchain_openai import ChatOpenAI
+from langchain_core.tools import tool
+from typing import Literal
 
-llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
+# Define the database URI and connection parameters
+DB_URI = "postgresql://torazocode:@localhost:5432/postgres?sslmode=disable"
+connection_kwargs = {
+    "autocommit": True,
+    "prepare_threshold": 0,
+}
 
-# Define the SQLite database
-DATABASE_URL = "sqlite:///chat_history.db"
-Base = declarative_base()
+# Define a tool function
+@tool
+def get_weather(city: Literal["nyc", "sf"]):
+    """Get the weather of the city"""
+    if city == "nyc":
+        return "It might be cloudy in nyc"
+    elif city == "sf":
+        return "It's always sunny in sf"
+    else:
+        raise AssertionError("Unknown city")
 
-class Session(Base):
-    __tablename__ = "sessions"
-    id = Column(Integer, primary_key=True)
-    session_id = Column(String, unique=True, nullable=False)
-    messages = relationship("Message", back_populates="session")
-
-class Message(Base):
-    __tablename__ = "messages"
-    id = Column(Integer, primary_key=True)
-    session_id = Column(Integer, ForeignKey("sessions.id"), nullable=False)
-    role = Column(String, nullable=False)
-    content = Column(Text, nullable=False)
-    session = relationship("Session", back_populates="messages")
-
-# Create the database and the tables
-engine = create_engine(DATABASE_URL)
-Base.metadata.create_all(engine)
-SessionLocal = sessionmaker(bind=engine)
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-# Function to save a single message
-def save_message(session_id: str, role: str, content: str):
-    db = next(get_db())
-    try:
-        session = db.query(Session).filter(Session.session_id == session_id).first()
-        if not session:
-            session = Session(session_id=session_id)
-            db.add(session)
-            db.commit()
-            db.refresh(session)
-
-        db.add(Message(session_id=session.id, role=role, content=content))
-        db.commit()
-    except SQLAlchemyError:
-        db.rollback()
-    finally:
-        db.close()
-
-# Function to load chat history
-def load_session_history(session_id: str) -> BaseChatMessageHistory:
-    db = next(get_db())
-    chat_history = ChatMessageHistory()
-    try:
-        session = db.query(Session).filter(Session.session_id == session_id).first()
-        if session:
-            for message in session.messages:
-                chat_history.add_message({"role": message.role, "content": message.content})
-    except SQLAlchemyError:
-        pass
-    finally:
-        db.close()
-
-    return chat_history
-
-# Modify the get_session_history function to use the database
-def get_session_history(session_id: str) -> BaseChatMessageHistory:
-    if session_id not in store:
-        store[session_id] = load_session_history(session_id)
-    return store[session_id]
-
-# # Ensure you save the chat history to the database when needed
-# def save_all_sessions():
-#     for session_id, chat_history in store.items():
-#         for message in chat_history.messages:
-#             save_message(session_id, message["role"], message["content"])
-
-# # Example of saving all sessions before exiting the application
-# import atexit
-# atexit.register(save_all_sessions)
-
-### Construct retriever ###
-loader = WebBaseLoader(
-    web_paths=("https://lilianweng.github.io/posts/2023-06-23-agent/",),
-    bs_kwargs=dict(
-        parse_only=bs4.SoupStrainer(
-            class_=("post-content", "post-title", "post-header")
-        )
-    ),
-)
-docs = loader.load()
-
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-splits = text_splitter.split_documents(docs)
-vectorstore = Chroma.from_documents(documents=splits, embedding=OpenAIEmbeddings())
-retriever = vectorstore.as_retriever()
-
-### Contextualize question ###
-contextualize_q_system_prompt = """Given a chat history and the latest user question \
-which might reference context in the chat history, formulate a standalone question \
-which can be understood without the chat history. Do NOT answer the question, \
-just reformulate it if needed and otherwise return it as is."""
-contextualize_q_prompt = ChatPromptTemplate.from_messages(
-    [
-        ("system", contextualize_q_system_prompt),
-        MessagesPlaceholder("chat_history"),
-        ("human", "{input}"),
-    ]
-)
-history_aware_retriever = create_history_aware_retriever(
-    llm, retriever, contextualize_q_prompt
-)
-
-### Answer question ###
-qa_system_prompt = """You are an assistant for question-answering tasks. \
-Use the following pieces of retrieved context to answer the question. \
-If you don't know the answer, just say that you don't know. \
-Use three sentences maximum and keep the answer concise.\
-
-{context}"""
-qa_prompt = ChatPromptTemplate.from_messages(
-    [
-        ("system", qa_system_prompt),
-        MessagesPlaceholder("chat_history"),
-        ("human", "{input}"),
-    ]
-)
-question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
-
-rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
-
-### Statefully manage chat history ###
-store = {}
-
-conversational_rag_chain = RunnableWithMessageHistory(
-    rag_chain,
-    get_session_history,
-    input_messages_key="input",
-    history_messages_key="chat_history",
-    output_messages_key="answer",
-)
-
-# Invoke the chain and save the messages after invocation
-def invoke_and_save(session_id, input_text):
-    # Save the user question with role "human"
-    save_message(session_id, "human", input_text)
+# Function to format and display the results
+def display_results(res, checkpoint_tuple):
+    # Extract relevant details
+    conversation_id = checkpoint_tuple.checkpoint['id']
     
-    result = conversational_rag_chain.invoke(
-        {"input": input_text},
-        config={"configurable": {"session_id": session_id}}
-    )["answer"]
+    # Get the latest AI message for the response
+    chat_response = res['messages'][-1].content
+    token_usage = res['messages'][-1].response_metadata['token_usage']
+    
+    input_tokens = token_usage['prompt_tokens']
+    output_tokens = token_usage['completion_tokens']
+    
+    # Display the results
+    print(f"\nConversation ID: {conversation_id}")
+    print(f"Chat Response: {chat_response}")
+    print(f"Input Tokens: {input_tokens}")
+    print(f"Output Tokens: {output_tokens}\n")
 
-    # Save the AI answer with role "ai"
-    save_message(session_id, "ai", result)
-    return result
+# Main interaction logic
+def main():
+    # Using a synchronous connection
+    with Connection.connect(DB_URI, **connection_kwargs) as conn:
+        # Initialize PostgresSaver
+        checkpointer = PostgresSaver(conn)
+        
+        # Setup checkpointer schema if it's the first time
+        checkpointer.setup()
 
-result = invoke_and_save("abc123", "how old am i")
-print(result)
+        # Create the LangGraph agent
+        model = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
+        tools = [get_weather]
+        graph = create_react_agent(model, tools=tools, checkpointer=checkpointer)
+
+        # Define the configuration
+        config = {"configurable": {"thread_id": "2"}}
+        
+        # Loop to take input and invoke the agent
+        while True:
+            user_input = input("Enter your prompt (or type 'exit' to quit): ")
+            if user_input.lower() == "exit":
+                break
+
+            # Invoke the agent with user input
+            res = graph.invoke({"messages": [("human", user_input)]}, config)
+            
+            # Get the latest checkpoint
+            checkpoint_tuple = checkpointer.get_tuple(config)
+
+            # Display the formatted results
+            display_results(res, checkpoint_tuple)
+
+# Run the interaction
+if __name__ == "__main__":
+    main()
