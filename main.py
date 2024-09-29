@@ -2,7 +2,7 @@
 from openai import OpenAI
 import os
 import struct
-import sys
+# import sys
 import pvporcupine
 import pyaudio
 import pvcobra
@@ -14,22 +14,187 @@ import json
 import threading
 from pathlib import Path
 import datetime
+import bs4
+from sqlalchemy import create_engine, Column, Integer, String, Text, ForeignKey
+from sqlalchemy.orm import sessionmaker, relationship, declarative_base
+from sqlalchemy.exc import SQLAlchemyError
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_chroma import Chroma
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_community.document_loaders import WebBaseLoader
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
+
+# Define the SQLite database
+DATABASE_URL = "sqlite:///chat_history.db"
+Base = declarative_base()
+
+class Session(Base):
+    __tablename__ = "sessions"
+    id = Column(Integer, primary_key=True)
+    session_id = Column(String, unique=True, nullable=False)
+    messages = relationship("Message", back_populates="session")
+
+class Message(Base):
+    __tablename__ = "messages"
+    id = Column(Integer, primary_key=True)
+    session_id = Column(Integer, ForeignKey("sessions.id"), nullable=False)
+    role = Column(String, nullable=False)
+    content = Column(Text, nullable=False)
+    session = relationship("Session", back_populates="messages")
+
+# Create the database and the tables
+engine = create_engine(DATABASE_URL)
+Base.metadata.create_all(engine)
+SessionLocal = sessionmaker(bind=engine)
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# Function to save a single message
+def save_message(session_id: str, role: str, content: str):
+    db = next(get_db())
+    try:
+        session = db.query(Session).filter(Session.session_id == session_id).first()
+        if not session:
+            session = Session(session_id=session_id)
+            db.add(session)
+            db.commit()
+            db.refresh(session)
+
+        db.add(Message(session_id=session.id, role=role, content=content))
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+    finally:
+        db.close()
+
+# Function to load chat history
+def load_session_history(session_id: str) -> BaseChatMessageHistory:
+    db = next(get_db())
+    chat_history = ChatMessageHistory()
+    try:
+        session = db.query(Session).filter(Session.session_id == session_id).first()
+        if session:
+            for message in session.messages:
+                chat_history.add_message({"role": message.role, "content": message.content})
+    except SQLAlchemyError:
+        pass
+    finally:
+        db.close()
+
+    return chat_history
+
+# Modify the get_session_history function to use the database
+def get_session_history(session_id: str) -> BaseChatMessageHistory:
+    if session_id not in store:
+        store[session_id] = load_session_history(session_id)
+    return store[session_id]
+
+# # Ensure you save the chat history to the database when needed
+# def save_all_sessions():
+#     for session_id, chat_history in store.items():
+#         for message in chat_history.messages:
+#             save_message(session_id, message["role"], message["content"])
+
+# # Example of saving all sessions before exiting the application
+# import atexit
+# atexit.register(save_all_sessions)
+
+### Construct retriever ###
+loader = WebBaseLoader(
+    web_paths=("https://lilianweng.github.io/posts/2023-06-23-agent/",),
+    bs_kwargs=dict(
+        parse_only=bs4.SoupStrainer(
+            class_=("post-content", "post-title", "post-header")
+        )
+    ),
+)
+docs = loader.load()
+
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+splits = text_splitter.split_documents(docs)
+vectorstore = Chroma.from_documents(documents=splits, embedding=OpenAIEmbeddings())
+retriever = vectorstore.as_retriever()
+
+### Contextualize question ###
+contextualize_q_system_prompt = """Given a chat history and the latest user question \
+which might reference context in the chat history, formulate a standalone question \
+which can be understood without the chat history. Do NOT answer the question, \
+just reformulate it if needed and otherwise return it as is."""
+contextualize_q_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", contextualize_q_system_prompt),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}"),
+    ]
+)
+history_aware_retriever = create_history_aware_retriever(
+    llm, retriever, contextualize_q_prompt
+)
+
+### Answer question ###
+qa_system_prompt = """You are an assistant for question-answering tasks. \
+Use the following pieces of retrieved context to answer the question. \
+If you don't know the answer, just say that you don't know. \
+Use three sentences maximum and keep the answer concise.\
+
+{context}"""
+qa_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", qa_system_prompt),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}"),
+    ]
+)
+question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+
+rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+
+### Statefully manage chat history ###
+store = {}
+
+conversational_rag_chain = RunnableWithMessageHistory(
+    rag_chain,
+    get_session_history,
+    input_messages_key="input",
+    history_messages_key="chat_history",
+    output_messages_key="answer",
+)
+
+# Invoke the chain and save the messages after invocation
+def invoke_and_save(session_id, input_text):
+    # Save the user question with role "human"
+    save_message(session_id, "human", input_text)
+    
+    result = conversational_rag_chain.invoke(
+        {"input": input_text},
+        config={"configurable": {"session_id": session_id}}
+    )["answer"]
+
+    # Save the AI answer with role "ai"
+    save_message(session_id, "ai", result)
+    return result
+
+result = invoke_and_save("abc123", "how old am i")
+print(result)
+
+print('______________________')
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 leopard = pvleopard.create(access_key=os.getenv("PICOVOICE_API_KEY"))
 print('Code starting...')
-
-def load_conversations():
-    if os.path.exists('conversations.json'):
-        with open('conversations.json', 'r') as f:
-            return json.load(f)
-    else:
-        return []
-
-def save_conversations(conversation_history):
-    with open('conversations.json', 'w') as f:
-        json.dump(conversation_history, f, indent=4)
 
 def compute_exact_datetime_sub_gpt(current_time, user_request):
     prompt = (
@@ -111,7 +276,7 @@ def transcribe(path):
     pass
 
 def shut_down():
-    sys.exit()
+    pass
 
 is_speaking_or_listening = False
 
@@ -182,6 +347,22 @@ custom_functions = [
         }
     }
 ]
+def quick_gpt_ping():
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Ping the GPT model to warm up the API connection."
+                }
+            ],
+            temperature=0,
+            max_tokens=1
+        )
+        print("[DEBUG] GPT ping successful.")
+    except Exception as e:
+        print(f"[ERROR] Failed to ping GPT: {e}")
 
 def openai_transcribe(path):
     audio_file = open(path, "rb")
@@ -191,12 +372,12 @@ def openai_transcribe(path):
     )
     return transcription.text
 
-def chatgpt_response(input_text, conversation_history):
-    messages = conversation_history[:]
-    messages.append({
+def chatgpt_response(input_text):
+    messages = [{
         "role": "user",
         "content": input_text
-    })
+    }]
+    print(messages)
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=messages,
@@ -208,17 +389,11 @@ def chatgpt_response(input_text, conversation_history):
         functions=custom_functions,
         function_call='auto'
     )
-    assistant_message = response
-    messages.append({
-        "role": "assistant",
-        "content": assistant_message.choices[0].message.content
-    })
-    save_conversations(messages)
-    return assistant_message
-
+    return response
+session_id = "session_123"
 def response_handle(input_text):
-    conversation_history = load_conversations()
-    response = chatgpt_response(input_text, conversation_history)
+    response = chatgpt_response(input_text)
+
     available_functions = {
         "shut_down": shut_down,
         "process_reminder_request": process_reminder_request,
@@ -269,7 +444,6 @@ def wake_word():
         print("[DEBUG] Suppressing stderr for logging purposes...")
         devnull = os.open(os.devnull, os.O_WRONLY)
         old_stderr = os.dup(2)
-        sys.stderr.flush()
         os.dup2(devnull, 2)
         os.close(devnull)
         print("[DEBUG] Stderr successfully suppressed.")
@@ -358,23 +532,9 @@ def save_audio_to_wav(audio_data, sample_width, sample_rate, filename):
     wf.writeframes(audio_data)
     wf.close()
 
-def transcribe_audio_with_whisper_cpp(filename):
-    whisper_cpp_path = "~/whisper.cpp/main"  # Adjust this path if necessary
-    model_path = "~/whisper.cpp/models/ggml-tiny.bin"
-    whisper_cpp_path = os.path.expanduser(whisper_cpp_path)
-    model_path = os.path.expanduser(model_path)
-    command = f"{whisper_cpp_path} -m {model_path} -f {filename} -otxt"
-    print("Running command: {}".format(command))
-    subprocess.run(command, shell=True)
-    transcription_file = f"{filename}.txt"
-    if os.path.exists(transcription_file):
-        with open(transcription_file, "r") as f:
-            transcription = f.read()
-            print("Transcription:\n", transcription)
-    else:
-        print("Error: Transcription file not found. The command may have failed.")
-
 def main():
+    quick_gpt_ping()
+
     reminder_thread = threading.Thread(target=check_reminders)
     reminder_thread.daemon = True
     reminder_thread.start()
@@ -387,7 +547,8 @@ def main():
             print("User:")
             print(output_text)
             print()
-            response_message = response_handle(output_text)
+            response_message = invoke_and_save("abc123", output_text)
+            # response_message = response_handle(output_text)
             audio(response_message)
             print("Assistant:")
             print(response_message)
