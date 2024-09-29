@@ -1,11 +1,21 @@
+import os
+import subprocess
 from typing import List, Optional, Literal
 import json
-
+import pvporcupine
+import pyaudio
+import pvcobra
+import wave
+import time
+import subprocess
+import pvleopard
+import threading
+from openai import OpenAI
 import tiktoken
 from langchain_openai import ChatOpenAI
 from langchain_openai.embeddings import OpenAIEmbeddings
 from langchain_community.tools.tavily_search import TavilySearchResults
-
+import struct
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.vectorstores import InMemoryVectorStore
@@ -17,6 +27,8 @@ from langchain_core.messages import get_buffer_string
 from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import ToolNode
+
+from reminder_system import ReminderSystem
 
 
 recall_vector_store = InMemoryVectorStore(OpenAIEmbeddings())
@@ -65,6 +77,8 @@ def search_recall_memories(query: str, config: RunnableConfig) -> List[str]:
         return doc.metadata.get("user_id") == user_id
 
     documents = recall_vector_store.similarity_search(query, k=3, filter=_filter_function)
+    print(f"Found documents: {documents}")  # Debug log
+
     return [document.page_content for document in documents]
 
 
@@ -224,51 +238,173 @@ def pretty_print_stream_chunk(chunk):
         print("\n")
 
 config = {"configurable": {"user_id": "1", "thread_id": "1"}}
+def get_gpt_response(input_text):
+    # Simulate sending input text to the GPT system
+    response_chunks = graph.stream({"messages": [("user", input_text)]}, config=config)
+    
+    # Collect the GPT response
+    gpt_response = ""
+    for chunk in response_chunks:
+        pretty_print_stream_chunk(chunk)  # Print each chunk including recalled memories
 
-# Step 1: Start with an introduction and long messages
-for chunk in graph.stream({"messages": [("user", 
-    "Hi, I'm Alice. I work as a software developer, and I'm really passionate about building web applications."
-    " I've been working in the industry for about 5 years now. I also enjoy playing guitar in my free time."
-)]}, config=config):
-    pretty_print_stream_chunk(chunk)
+        for node, updates in chunk.items():
 
-print('_______________________')
+            if "messages" in updates:
+                message = updates["messages"][-1]
+                if isinstance(message, AIMessage):
+                    gpt_response += message.content  # Append AI's response content
 
-# Step 2: More details to enrich the conversation
-for chunk in graph.stream({"messages": [("user", 
-    "One of my favorite technologies to work with is React. I use it all the time for frontend development."
-    " I also use Node.js for backend work, and I recently started learning GraphQL. I'm hoping to become"
-    " proficient in it over the next few months. Additionally, I'm a big fan of open-source software and"
-    " contribute to several projects in my free time."
-)]}, config=config):
-    pretty_print_stream_chunk(chunk)
+    return gpt_response
 
-print('_______________________')
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+pv_access_key = os.getenv("PICOVOICE_API_KEY")
 
-# Step 3: Continue with more details and unrelated conversation
-for chunk in graph.stream({"messages": [("user", 
-    "Last weekend, I went hiking with my friends. It was a lot of fun, and we even encountered some wildlife."
-    " I love being outdoors and exploring new trails whenever I get the chance. It’s a great way to disconnect"
-    " from work and recharge. We were lucky with the weather too—it was sunny but not too hot."
-)]}, config=config):
-    pretty_print_stream_chunk(chunk)
+leopard = pvleopard.create(access_key=os.getenv("PICOVOICE_API_KEY"))
 
-print('_______________________')
+def audio(prompt):
+    speech_file_path = "output_audio.wav"
+    with client.audio.speech.with_streaming_response.create(
+        model="tts-1",
+        voice="alloy",
+        input=prompt,
+    ) as response:
+        response.stream_to_file(speech_file_path)
+    subprocess.run(['afplay', 'output_audio.wav'])  # Use 'afplay' on MacOS
+reminder_system = ReminderSystem(client, audio)
+# Start the reminder thread
+reminder_thread = threading.Thread(target=reminder_system.check_reminders)
+reminder_thread.daemon = True
+reminder_thread.start()
+def openai_transcribe(path):
+    audio_file = open(path, "rb")
+    transcription = client.audio.transcriptions.create(
+        model="whisper-1",
+        file=audio_file
+    )
+    return transcription.text
 
-# Step 4: Now, after some long unrelated conversation, try to recall the stored information
-for chunk in graph.stream({"messages": [("user", "What's my name?")]}, config=config):
-    pretty_print_stream_chunk(chunk)
+def wake_word():
+    print("[DEBUG] Starting wake_word function...")
+    try:
+        print("[DEBUG] Initializing Porcupine with access key and keyword paths...")
+        porcupine = pvporcupine.create(
+            keywords=["computer"],    # Use the built-in wake word "computer"
+            access_key=pv_access_key,
+            sensitivities=[0.5]
+        )
+        print("[DEBUG] Porcupine successfully initialized.")
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize Porcupine: {e}")
+        return
+    try:
+        print("[DEBUG] Suppressing stderr for logging purposes...")
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        old_stderr = os.dup(2)
+        os.dup2(devnull, 2)
+        os.close(devnull)
+        print("[DEBUG] Stderr successfully suppressed.")
+    except Exception as e:
+        print(f"[ERROR] Failed to suppress stderr: {e}")
+        return
+    try:
+        print("[DEBUG] Initializing PyAudio...")
+        wake_pa = pyaudio.PyAudio()
+        print("[DEBUG] PyAudio successfully initialized.")
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize PyAudio: {e}")
+        return
+    try:
+        print(f"[DEBUG] Opening audio stream with rate={porcupine.sample_rate}, channels=1, format=paInt16, input=True, frames_per_buffer={porcupine.frame_length}...")
+        porcupine_audio_stream = wake_pa.open(
+            rate=porcupine.sample_rate,
+            channels=1,
+            format=pyaudio.paInt16,
+            input=True,
+            frames_per_buffer=porcupine.frame_length
+        )
+        print("[DEBUG] Audio stream successfully opened.")
+    except Exception as e:
+        print(f"[ERROR] Failed to open audio stream: {e}")
+        return
+    print("[DEBUG] Listening for wake word...")
+    try:
+        while True:
+            porcupine_pcm = porcupine_audio_stream.read(porcupine.frame_length)
+            porcupine_pcm = struct.unpack_from("h" * porcupine.frame_length, porcupine_pcm)
+            porcupine_keyword_index = porcupine.process(porcupine_pcm)
+            if porcupine_keyword_index >= 0:
+                print("Wake word detected!")
+                break
+    finally:
+        porcupine_audio_stream.stop_stream()
+        porcupine_audio_stream.close()
+        porcupine.delete()
+        os.dup2(old_stderr, 2)
+        os.close(old_stderr)
+        wake_pa.terminate()
 
-print('_______________________')
+def detect_silence_and_record(min_recording_duration=2.0, silence_duration_threshold=1.3, output_filename="recorded_audio.wav"):
 
-# Step 5: Try recalling more specific details
-for chunk in graph.stream({"messages": [("user", "What do I like to do in my free time?")]}, config=config):
-    pretty_print_stream_chunk(chunk)
+    is_speaking_or_listening = True
+    cobra = pvcobra.create(access_key=pv_access_key)
+    silence_pa = pyaudio.PyAudio()
+    cobra_audio_stream = silence_pa.open(
+        rate=cobra.sample_rate,
+        channels=1,
+        format=pyaudio.paInt16,
+        input=True,
+        frames_per_buffer=cobra.frame_length
+    )
+    last_voice_time = time.time()
+    start_time = time.time()
+    audio_data = []
+    print("Listening for voice activity...")
+    while True:
+        cobra_pcm = cobra_audio_stream.read(cobra.frame_length)
+        cobra_pcm = struct.unpack_from("h" * cobra.frame_length, cobra_pcm)
+        voice_prob = cobra.process(cobra_pcm)
+        audio_data.extend(cobra_pcm)
+        if voice_prob > 0.2:
+            last_voice_time = time.time()
+        else:
+            silence_duration = time.time() - last_voice_time
+            elapsed_time = time.time() - start_time
+            if elapsed_time > min_recording_duration and silence_duration > silence_duration_threshold:
+                print("End of query detected\n")
+                break
+    cobra_audio_stream.stop_stream()
+    cobra_audio_stream.close()
+    cobra.delete()
+    save_audio_to_wav(audio_data, silence_pa.get_sample_size(pyaudio.paInt16), cobra.sample_rate, output_filename)
+    print(f"Audio saved to {output_filename}")
+    is_speaking_or_listening = False
 
-print('_______________________')
+def save_audio_to_wav(audio_data, sample_width, sample_rate, filename):
+    audio_data = struct.pack('<' + ('h' * len(audio_data)), *audio_data)
+    wf = wave.open(filename, 'wb')
+    wf.setnchannels(1)
+    wf.setsampwidth(sample_width)
+    wf.setframerate(sample_rate)
+    wf.writeframes(audio_data)
+    wf.close()
 
-# Step 6: Test further memory recall
-for chunk in graph.stream({"messages": [("user", "What technologies do I like to work with?")]}, config=config):
-    pretty_print_stream_chunk(chunk)
+def main():
+    try:
+        while True:
+            wake_word()
+            detect_silence_and_record()
+            output_text = openai_transcribe("recorded_audio.wav")
+            print("User:")
+            print(output_text)
+            print()
+            response_message = get_gpt_response(output_text)
+            audio(response_message)
+            print("Assistant:")
+            print(response_message)
+    except KeyboardInterrupt:
+        print("\nExiting...")
+    finally:
+        pass
 
-print('_______________________')
+if __name__ == "__main__":
+    main()
