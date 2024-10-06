@@ -242,13 +242,13 @@ def pretty_print_stream_chunk(chunk):
 
 config = {"configurable": {"user_id": "1", "thread_id": "1"}}
 
-# Step 1: Start with an introduction and long messages
+# # Step 1: Start with an introduction and long messages
 for chunk in graph.stream({"messages": [("user", 
-    "tell me everything you know about me"
+    "im 16 years old"
 )]}, config=config):
     pretty_print_stream_chunk(chunk)
 
-print('_______________________')
+# print('_______________________')
 
 # # Step 2: More details to enrich the conversation
 # for chunk in graph.stream({"messages": [("user", 

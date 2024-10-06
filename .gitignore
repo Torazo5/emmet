@@ -1,0 +1,16 @@
+# Byte-compiled Python files
+__pycache__/
+*.py[cod]
+*.pyc
+
+# Database files
+*.db
+chroma_langchain_db/
+db/
+
+# Audio files
+*.wav
+
+# Virtual environments
+venv/
+.venv/

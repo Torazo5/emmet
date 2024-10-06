@@ -391,9 +391,10 @@ def save_audio_to_wav(audio_data, sample_width, sample_rate, filename):
 def main():
     try:
         while True:
-            wake_word()
-            detect_silence_and_record()
-            output_text = openai_transcribe("recorded_audio.wav")
+            output_text = input("Type your message: ")
+            # wake_word()
+            # detect_silence_and_record()
+            # output_text = openai_transcribe("recorded_audio.wav")
             print("User:")
             print(output_text)
             print()
