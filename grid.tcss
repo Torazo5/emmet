@@ -1,18 +1,43 @@
-Static {
-    content-align: center middle;
-    background: green;
-    border: solid darkred;
-    height: 1fr;
-}
-
-.column {
-    width: 1fr;
-}
-
-.special-text {
-    color: black;          /* Change the text color for "Three" */
-}
-#buttons {
+Input {
     dock: top;
+    margin-top: 1;
+}
+
+#colors {
+    grid-size: 2 1;
+    grid-gutter: 2 4;
+    grid-columns: 1fr;
+    margin: 0 1;
+}
+
+#old {
+    height: 100%;
+    border: wide $secondary;
+}
+
+#new {
+    height: 100%;
+    border: wide $secondary;
+}
+
+
+#chat_grid {
+    grid-size: 1 2;          /* 1 column, 2 rows */
+    grid-gutter: 1;          /* Add spacing between grid cells */
+    grid-rows: 1fr 20fr;      /* The first row (label) gets 1 fraction, the second row (RichLog) gets 5 fractions */
+}
+#label {
+    height: 1;
+    content-align: left top;
+}
+
+#chat_log {
     height: auto;
+    overflow-y: auto;
+    content-align: left top;
+}
+
+#user_input {
+    height: 3;
+    dock: bottom;
 }
