@@ -14,4 +14,4 @@ python-dotenv
 sqlalchemy
 langgraph
 chromadb
-uuid4
+textual

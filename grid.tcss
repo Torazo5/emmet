@@ -1,0 +1,18 @@
+Static {
+    content-align: center middle;
+    background: green;
+    border: solid darkred;
+    height: 1fr;
+}
+
+.column {
+    width: 1fr;
+}
+
+.special-text {
+    color: black;          /* Change the text color for "Three" */
+}
+#buttons {
+    dock: top;
+    height: auto;
+}

@@ -14,3 +14,4 @@ db/
 # Virtual environments
 venv/
 .venv/
+.env
