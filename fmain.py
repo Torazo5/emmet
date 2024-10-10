@@ -1,14 +1,10 @@
 import os
 import subprocess
-from typing import List, Optional, Literal
-import subprocess
 import pvleopard
-import threading
 from openai import OpenAI
 
 import audio_system  # Import the audio_system module
 
-from reminder_system import ReminderSystem
 
 from gpt_handler import get_gpt_response
 
@@ -18,23 +14,9 @@ pv_access_key = "dTCBFbOZQwKJdtDKJhR3reYiEDGK6tuMEe2c37XGy1jGv1ad6gFZXg=="
 leopard = pvleopard.create(access_key=os.getenv("PICOVOICE_API_KEY"))
 def audio(prompt):
     """Wrapper function to use audio_system's audio function."""
-    audio_system.audio(prompt, client)
-
-reminder_system = ReminderSystem(client, audio)
-# Start the reminder thread
-reminder_thread = threading.Thread(target=reminder_system.check_reminders)
-reminder_thread.daemon = True
-reminder_thread.start()
-def openai_transcribe(path):
-    audio_file = open(path, "rb")
-    transcription = client.audio.transcriptions.create(
-        model="whisper-1",
-        file=audio_file
-    )
-    return transcription.text
+    audio_system.audio(prompt)
 
 from enum import Enum
-# USE_VOICE_INPUT = False  # Change to True to use voice input
 
 class ConversationState(Enum):
     WAIT_FOR_WAKE_WORD = 1
@@ -44,7 +26,7 @@ class ConversationState(Enum):
 
 def state_machine():
     state = ConversationState.WAIT_FOR_WAKE_WORD
-    USE_VOICE_INPUT = False  # Change to True to use voice input
+    USE_VOICE_INPUT = True  # Change to True to use voice input
     print('got here')
     while True:
         if state == ConversationState.WAIT_FOR_WAKE_WORD:
@@ -61,8 +43,7 @@ def state_machine():
             # Detect silence and record user input after wake word or assistant question
             print("[STATE] Listening for user input...")
             if USE_VOICE_INPUT:
-                audio_system.detect_silence_and_record()
-                output_text = openai_transcribe("recorded_audio.wav")
+                output_text = audio_system.detect_silence_and_record()
             else:
                 output_text = input("You: ")
             print("User:", output_text)

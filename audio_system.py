@@ -8,11 +8,13 @@ import pvcobra
 import wave
 import time
 import struct
+from openai import OpenAI
 
 # Replace with your actual Picovoice access key
 PV_ACCESS_KEY = os.getenv('PICOVOICE_API_KEY')
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-def audio(prompt, client):
+def audio(prompt):
     """Convert text to speech and play it."""
     speech_file_path = "output_audio.wav"
     with client.audio.speech.with_streaming_response.create(
@@ -23,8 +25,9 @@ def audio(prompt, client):
         response.stream_to_file(speech_file_path)
     subprocess.run(['afplay', 'output_audio.wav'])  # Use 'afplay' on macOS
 
-def openai_transcribe(path, client):
+def openai_transcribe(path):
     """Transcribe audio using OpenAI's Whisper model."""
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     with open(path, "rb") as audio_file:
         transcription = client.audio.transcriptions.create(
             model="whisper-1",
@@ -88,7 +91,7 @@ def wake_word():
         wake_pa.terminate()
 
 def detect_silence_and_record(
-    min_recording_duration=2.0,
+    min_recording_duration=1.0,
     silence_duration_threshold=1.3,
     output_filename="recorded_audio.wav"
 ):
@@ -134,6 +137,8 @@ def detect_silence_and_record(
         )
         silence_pa.terminate()
         print(f"Audio saved to {output_filename}")
+        return(openai_transcribe("recorded_audio.wav"))
+
 
 def save_audio_to_wav(audio_data, sample_width, sample_rate, filename):
     """Save audio data to a WAV file."""

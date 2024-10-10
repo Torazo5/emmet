@@ -20,7 +20,6 @@ Input {
     border: wide $secondary;
 }
 
-
 #chat_grid {
     grid-size: 1 2;          /* 1 column, 2 rows */
     grid-gutter: 1;          /* Add spacing between grid cells */
