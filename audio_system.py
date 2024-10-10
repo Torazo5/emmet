@@ -13,7 +13,6 @@ from openai import OpenAI
 # Replace with your actual Picovoice access key
 PV_ACCESS_KEY = os.getenv('PICOVOICE_API_KEY')
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
 def audio(prompt):
     """Convert text to speech and play it."""
     speech_file_path = "output_audio.wav"
@@ -38,6 +37,7 @@ def openai_transcribe(path):
 def wake_word():
     """Wait for the wake word 'computer' using Porcupine."""
     print("[DEBUG] Starting wake_word function...")
+
     try:
         porcupine = pvporcupine.create(
             keywords=["computer"],
@@ -47,16 +47,6 @@ def wake_word():
         print("[DEBUG] Porcupine successfully initialized.")
     except Exception as e:
         print(f"[ERROR] Failed to initialize Porcupine: {e}")
-        return
-
-    try:
-        # Suppress stderr
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        old_stderr = os.dup(2)
-        os.dup2(devnull, 2)
-        os.close(devnull)
-    except Exception as e:
-        print(f"[ERROR] Failed to suppress stderr: {e}")
         return
 
     try:
@@ -86,10 +76,7 @@ def wake_word():
         porcupine_audio_stream.stop_stream()
         porcupine_audio_stream.close()
         porcupine.delete()
-        os.dup2(old_stderr, 2)
-        os.close(old_stderr)
         wake_pa.terminate()
-
 def detect_silence_and_record(
     min_recording_duration=1.0,
     silence_duration_threshold=1.3,

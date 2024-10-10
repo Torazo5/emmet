@@ -1,14 +1,8 @@
 import os
-import subprocess
 import pvleopard
-from openai import OpenAI
-
 import audio_system  # Import the audio_system module
-
-
 from gpt_handler import get_gpt_response
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 pv_access_key = "dTCBFbOZQwKJdtDKJhR3reYiEDGK6tuMEe2c37XGy1jGv1ad6gFZXg=="
 
 leopard = pvleopard.create(access_key=os.getenv("PICOVOICE_API_KEY"))
@@ -60,18 +54,16 @@ def state_machine():
             response_message = response_data['text_response']
             recalled_memories = response_data['recalled_memories']
             saved_memories = response_data['saved_memories']
-            
+            if recalled_memories:
+                print("Recalled Memories:")
+                for memory in recalled_memories:
+                    print(f"- {memory}")
             if USE_VOICE_INPUT:
                 print("Assistant:", response_message)
                 audio(response_message)
             else:
                 print("Assistant:", response_message)
             
-            # Print recalled and saved memories
-            if recalled_memories:
-                print("Recalled Memories:")
-                for memory in recalled_memories:
-                    print(f"- {memory}")
             if saved_memories:
                 print("Saved Memories:")
                 for memory in saved_memories:
