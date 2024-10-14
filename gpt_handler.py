@@ -4,21 +4,22 @@ import os
 import uuid
 from typing import List
 from typing_extensions import TypedDict
-
+from datetime import datetime
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langchain_core.messages import get_buffer_string, HumanMessage, AIMessage
-
 from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import ToolNode
-
 import chromadb
-
 from langchain_chroma import Chroma
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+import getpass
 
 # Initialize OpenAI embeddings
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
@@ -46,6 +47,115 @@ class KnowledgeTriple(TypedDict):
     subject: str
     predicate: str
     object_: str
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+import os  # For accessing environment variables
+from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import tool
+
+@tool
+def send_email_tool(subject: str, body: str, to_email: str = "tokud70460@gapps.uwcsea.edu.sg", config: RunnableConfig = None) -> str:
+    """
+    Send an email using Gmail's SMTP server with UTF-8 encoding. Do not make it formal, just include the information necessary. 
+
+    Args:
+        subject (str): The subject of the email.
+        body (str): The body content of the email.
+        to_email (str): The recipient's email address (default is Torazo's own email).
+        config (RunnableConfig): Configuration passed by the runtime (optional).
+
+    Returns:
+        str: A message indicating the success or failure of the email sending.
+    """
+    smtp_server = "smtp.gmail.com"
+    smtp_port = 587
+    sender_email = 'tokud70460@gapps.uwcsea.edu.sg'  # Fetch the email from environment variable
+    sender_password = os.getenv("EMAIL_PASS")  # Fetch the password from environment variable
+
+    if not sender_email or not sender_password:
+        return "Error: Email credentials are not set in environment variables."
+
+    try:
+        server = smtplib.SMTP(smtp_server, smtp_port)
+        server.starttls()  # Start TLS for security
+        server.login(sender_email, sender_password)
+
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
+        msg['To'] = to_email
+        msg['Subject'] = subject
+
+        # Use UTF-8 encoding for both subject and body
+        msg.attach(MIMEText(body.encode('utf-8'), 'plain', 'utf-8'))
+
+        server.send_message(msg)
+        server.quit()
+
+        return f"Email successfully sent to {to_email}"
+
+    except Exception as e:
+        return f"Error: {e}"
+
+@tool
+def get_current_time(config: RunnableConfig) -> str:
+    """
+    Fetch the current timestamp in the format 'YYYY-MM-DD HH:MM:SS'.
+
+    This function returns the current system time, which can be used in other tools 
+    to record events such as study logs with accurate timestamps.
+
+    Args:
+        config (RunnableConfig): Configuration passed by the runtime (e.g., user-specific settings).
+
+    Returns:
+        str: The current time as a formatted string.
+    """
+    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    return current_time
+
+@tool
+def save_study_session(duration_hours: float, subject: str, config: RunnableConfig) -> str:
+    """
+    Save a study session log that includes the duration of study, subject, and any additional notes.
+
+    This function records a study session into a file with the current year and month as the filename.
+    The session includes the duration in hours, subject of study, and any additional notes provided
+    by the user.
+
+    Args:
+        duration_hours (float): The amount of time spent studying (in hours).
+        subject (str): The subject or topic that was studied.
+        config: Runnable configuration that contains the user ID.
+
+    Returns:
+        str: A message confirming that the study session has been successfully logged.
+    """
+    try:
+        # Get the current timestamp using the real-time tool
+        current_time = get_current_time(config)
+
+        # Define the directory to save logs (e.g., './study_sessions/{user_id}')
+        directory = f"./study_sessions"
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+
+        # Generate the filename based on the current year and month (e.g., '2024-10.txt')
+        now = datetime.now()
+        file_name = f"{now.year}-{now.month:02d}.txt"
+        file_path = os.path.join(directory, file_name)
+
+        # Append the study session details to the file
+        session_log = (
+            f"{current_time} - Studied {duration_hours} hours on {subject}. \n"
+        )
+        with open(file_path, "a") as file:
+            file.write(session_log)
+
+        return f"Study session successfully saved to {file_path}."
+
+    except Exception as e:
+        return f"Error saving study session: {str(e)}"
 
 @tool
 def save_recall_memory(memories: List[dict], config: RunnableConfig) -> str:
@@ -203,7 +313,8 @@ prompt = ChatPromptTemplate.from_messages(
 )
 
 model = ChatOpenAI(model_name="gpt-4o-mini")
-tools = [save_recall_memory, search_recall_memories]
+
+tools = [save_recall_memory, search_recall_memories, save_study_session, get_current_time, send_email_tool]
 
 model_with_tools = model.bind_tools(tools)
 

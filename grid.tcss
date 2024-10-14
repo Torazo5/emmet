@@ -40,3 +40,10 @@ Input {
     height: 3;
     dock: bottom;
 }
+
+# #state_indicator {
+#     width: 100%;           /* Full width */
+#     height: 1vh;          /* Fixed height for the block */
+#     background: white;     /* Background color of the block */
+#     text-align: center;    /* Center align the text */
+# }
